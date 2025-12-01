@@ -113,30 +113,6 @@ def get_role_color(ruolo):
     colors = {'P': '#f39c12', 'D': '#27ae60', 'C': '#2980b9', 'A': '#c0392b'}
     return colors.get(ruolo, 'black')
 
-# --- STYLING 4 LIVELLI ---
-def highlight_voti(val):
-    """
-    Colora i voti in base alla media:
-    < 5: Rosso Scuro
-    5 - 6: Rosso Tenue
-    6 - 7: Verde Tenue
-    >= 7: Verde Scuro
-    """
-    try:
-        v = float(val)
-        if v < 5.0:
-            color = '#b71c1c' # Rosso Scuro (Dark Red)
-        elif v < 6.0:
-            color = '#e57373' # Rosso Tenue (Light Red)
-        elif v < 7.0:
-            color = '#4caf50' # Verde Tenue (Green)
-        else:
-            color = '#1b5e20' # Verde Scuro (Dark Green)
-            
-        return f'color: {color}; font-weight: bold'
-    except:
-        return ''
-
 def applica_stile_ruoli(val):
     return f'color: {get_role_color(val)}; font-weight: bold'
 
@@ -218,9 +194,10 @@ def parse_calendario_complesso(filepath):
     except: return None
 
 def get_table_config():
+    # CONFIGURAZIONE IBRIDA: BARRE PER I VOTI, NUMERI PER IL RESTO
     return {
-        "Fanta_Media": st.column_config.NumberColumn("FM", format="%.2f"),
-        "Media_Voto": st.column_config.NumberColumn("MV", format="%.2f"),
+        "Fanta_Media": st.column_config.ProgressColumn("FM", min_value=4, max_value=10, format="%.2f"),
+        "Media_Voto": st.column_config.ProgressColumn("MV", min_value=4, max_value=8, format="%.2f"),
         "Gol_Totali": st.column_config.NumberColumn("Gol", format="%d"),
         "Gol_Subiti": st.column_config.NumberColumn("Subiti", format="%d"),
         "Assist": st.column_config.NumberColumn("Ass", format="%d"),
@@ -356,6 +333,7 @@ else:
 
 st.title("⚽ Fanta-Manager 2026")
 
+# SIDEBAR
 st.sidebar.header("Pannello Controllo")
 if st.sidebar.button("🔄 Ricarica Rose (Reset)"):
     if os.path.exists(FILE_ROSE_IMPORT):
@@ -499,12 +477,11 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
         d_team = d_team.sort_values('Ruolo', key=lambda x: x.map({'P':0, 'D':1, 'C':2, 'A':3}))
         d_team['Pos'] = range(1, len(d_team)+1)
         
-        # NUOVO ORDINE COLONNE
         cols_ok = ['Pos', 'Ruolo', 'Giocatore', 'Logo_SerieA', 'Costo', 'Status_Probabile', 'Media_Voto', 'Fanta_Media', 'Partite_Giocate', 'Gol_Totali', 'Assist', 'Ammonizioni', 'Espulsioni']
         
         h_table = (len(d_team) + 1) * 35 + 3
         st.dataframe(
-            d_team[cols_ok].style.map(applica_stile_ruoli, subset=['Ruolo']).map(highlight_voti, subset=['Media_Voto', 'Fanta_Media']),
+            d_team[cols_ok].style.map(applica_stile_ruoli, subset=['Ruolo']),
             use_container_width=True, 
             hide_index=True,
             height=h_table,
@@ -520,10 +497,8 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
         if ruolo != "Tutti": view = view[view['Ruolo'] == ruolo]
         view = view.sort_values(order, ascending=False)
         view['Pos'] = range(1, len(view) + 1)
-        
-        # STESSO ORDINE E COLORI PER LISTA GENERALE
         st.dataframe(
-            view.head(50)[cols_ok].style.map(applica_stile_ruoli, subset=['Ruolo']).map(highlight_voti, subset=['Media_Voto', 'Fanta_Media']),
+            view.head(50)[cols_ok].style.map(applica_stile_ruoli, subset=['Ruolo']),
             use_container_width=True, hide_index=True, column_config=get_table_config()
         )
         st.divider()
