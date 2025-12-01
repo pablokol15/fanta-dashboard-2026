@@ -4,6 +4,7 @@ import os
 import glob
 import re
 import requests
+import base64
 from bs4 import BeautifulSoup
 
 # --- CONFIGURAZIONE ---
@@ -18,7 +19,26 @@ DIR_VOTI = 'Voti'
 DIR_IMG = 'img'
 DIR_LOGO = 'logo'
 
+# --- MAPPA SIGLE EXCEL -> NOMI FILE ---
+MAPPA_SERIE_A = {
+    'Int': 'inter', 'Mil': 'milan', 'Juv': 'juventus', 'Nap': 'napoli', 'Rom': 'roma',
+    'Laz': 'lazio', 'Ata': 'atalanta', 'Fio': 'fiorentina', 'Bol': 'bologna', 'Tor': 'torino',
+    'Udi': 'udinese', 'Gen': 'genoa', 'Ver': 'verona', 'Lec': 'lecce', 'Emp': 'empoli',
+    'Mon': 'monza', 'Cag': 'cagliari', 'Sal': 'salernitana', 'Sas': 'sassuolo', 'Fro': 'frosinone',
+    'Par': 'parma', 'Com': 'como', 'Ven': 'venezia', 'Cre': 'cremonese', 'Spe': 'spezia',
+    'Pis': 'pisa', 'Bar': 'bari', 'Sam': 'sampdoria'
+}
+
 # --- 1. FUNZIONI DI UTILITÀ ---
+
+def img_to_base64(path):
+    if not path or not os.path.exists(path): return None
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        encoded = base64.b64encode(data).decode()
+        return f"data:image/png;base64,{encoded}"
+    except: return None
 
 def normalizza_nome(nome):
     if pd.isna(nome): return ""
@@ -42,7 +62,7 @@ def trova_immagine(nome_giocatore):
             return os.path.join(DIR_IMG, f)
     return None
 
-def trova_logo(nome_squadra):
+def trova_logo_fanta(nome_squadra):
     if not os.path.exists(DIR_LOGO): return None
     files = os.listdir(DIR_LOGO)
     if pd.isna(nome_squadra): return None
@@ -51,6 +71,17 @@ def trova_logo(nome_squadra):
         if normalizza_nome(f.split('.')[0]) == nome_clean: return os.path.join(DIR_LOGO, f)
     for f in files:
         if nome_clean in normalizza_nome(f.split('.')[0]): return os.path.join(DIR_LOGO, f)
+    return None
+
+def trova_logo_seriea(sigla_excel):
+    if not os.path.exists(DIR_LOGO): return None
+    if pd.isna(sigla_excel): return None
+    chiave = str(sigla_excel).capitalize()
+    nome_target = MAPPA_SERIE_A.get(chiave, str(sigla_excel).lower())
+    files = os.listdir(DIR_LOGO)
+    for f in files:
+        if f.lower().startswith(nome_target.lower() + "."):
+            return os.path.join(DIR_LOGO, f)
     return None
 
 def estrai_numero_giornata(filepath):
@@ -66,6 +97,11 @@ def check_database_integrity(df):
                 'Rigori_Parati', 'Autoreti']
     if 'Status_Probabile' not in df.columns: df['Status_Probabile'] = '?'
     if df.empty: return df
+    
+    if 'Squadra_SerieA' in df.columns:
+        df['Path_Logo'] = df['Squadra_SerieA'].apply(trova_logo_seriea)
+        df['Logo_SerieA'] = df['Path_Logo'].apply(img_to_base64)
+
     for col in cols_float:
         if col not in df.columns: df[col] = 0.0
     for col in cols_int:
@@ -77,10 +113,34 @@ def get_role_color(ruolo):
     colors = {'P': '#f39c12', 'D': '#27ae60', 'C': '#2980b9', 'A': '#c0392b'}
     return colors.get(ruolo, 'black')
 
+# --- STYLING 4 LIVELLI ---
+def highlight_voti(val):
+    """
+    Colora i voti in base alla media:
+    < 5: Rosso Scuro
+    5 - 6: Rosso Tenue
+    6 - 7: Verde Tenue
+    >= 7: Verde Scuro
+    """
+    try:
+        v = float(val)
+        if v < 5.0:
+            color = '#b71c1c' # Rosso Scuro (Dark Red)
+        elif v < 6.0:
+            color = '#e57373' # Rosso Tenue (Light Red)
+        elif v < 7.0:
+            color = '#4caf50' # Verde Tenue (Green)
+        else:
+            color = '#1b5e20' # Verde Scuro (Dark Green)
+            
+        return f'color: {color}; font-weight: bold'
+    except:
+        return ''
+
 def applica_stile_ruoli(val):
     return f'color: {get_role_color(val)}; font-weight: bold'
 
-# --- SCRAPING GAZZETTA (FILTRO AVANZATO) ---
+# --- SCRAPING ---
 @st.cache_data(ttl=3600)
 def scarica_probabili_formazioni():
     url = "https://www.gazzetta.it/Calcio/prob_form/"
@@ -89,26 +149,10 @@ def scarica_probabili_formazioni():
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # Prendo il testo
             full_text = soup.get_text().lower()
-            
-            # --- PULIZIA DEL TESTO ---
-            # Rimuoviamo tutto ciò che segue parole chiave "pericolose" per ogni blocco partita
-            # Siccome il testo è tutto unito, proviamo a rimuovere le sezioni note di "non titolarità"
-            
-            # Parole che indicano liste di NON titolari
             bad_words = ["indisponibili", "squalificati", "ballottaggi", "panchina", "diffidati", "disposizione in campo"]
-            
-            # Sostituiamo queste sezioni con spazio vuoto
-            # Regex: cerca la parola chiave e prendi i successivi 100 caratteri (o fino a punto)
-            # Metodo più aggressivo: Splittiamo il testo e teniamo solo i pezzi "buoni"
-            # Ma essendo un blocco unico è rischioso.
-            
-            # Metodo Euristico: Sostituisco "indisponibili: nome, nome" con "..."
             for word in bad_words:
-                # Cerca la parola chiave seguita da testo fino a un punto o a capo
                 full_text = re.sub(rf"{word}.*?(\.|\n|$)", "", full_text, flags=re.DOTALL)
-            
             return full_text
     except: pass
     return ""
@@ -116,12 +160,7 @@ def scarica_probabili_formazioni():
 def verifica_titolare(nome, text):
     if not text: return "⚪"
     cog = normalizza_per_confronto_web(nome)
-    
-    # Se il cognome è molto corto o comune, cerca anche il nome
-    if len(cog) < 3:
-        # Se è troppo corto rischio falsi positivi, meglio grigio se non siamo sicuri
-        return "⚪"
-        
+    if len(cog) < 3: return "⚪"
     return "🟢" if cog in text else "⚪"
 
 # --- LETTURA FILE ---
@@ -131,24 +170,18 @@ def leggi_excel_intelligente(filepath):
             df_preview = pd.read_csv(filepath, header=None, nrows=10, encoding='latin1', sep=None, engine='python')
         else:
             df_preview = pd.read_excel(filepath, header=None, nrows=10)
-        
         header_row_idx = -1
         for idx, row in df_preview.iterrows():
             row_str = row.astype(str).str.lower().tolist()
             if any(x in row_str for x in ['calciatore', 'nome', 'pos', 'squadra']):
                 header_row_idx = idx
                 break
-        
         if filepath.endswith('.csv'):
-            if header_row_idx != -1:
-                return pd.read_csv(filepath, header=header_row_idx, encoding='latin1', sep=None, engine='python')
-            else:
-                return pd.read_csv(filepath, encoding='latin1', sep=None, engine='python')
+            if header_row_idx != -1: return pd.read_csv(filepath, header=header_row_idx, encoding='latin1', sep=None, engine='python')
+            else: return pd.read_csv(filepath, encoding='latin1', sep=None, engine='python')
         else:
-            if header_row_idx != -1:
-                return pd.read_excel(filepath, header=header_row_idx)
-            else:
-                return pd.read_excel(filepath)
+            if header_row_idx != -1: return pd.read_excel(filepath, header=header_row_idx)
+            else: return pd.read_excel(filepath)
     except Exception: return None
 
 # --- PARSER CALENDARIO ---
@@ -158,10 +191,8 @@ def parse_calendario_complesso(filepath):
             df = pd.read_csv(filepath, header=None, encoding='latin1', sep=None, engine='python')
         else:
             df = pd.read_excel(filepath, header=None)
-        
         matches = []
         rows, cols = df.shape
-        
         for r in range(rows):
             for c in range(cols):
                 cell_val = str(df.iat[r, c]).lower()
@@ -171,10 +202,7 @@ def parse_calendario_complesso(filepath):
                         g_seriea = "?"
                         if c+2 < cols:
                             s_str = str(df.iat[r, c+2]).lower()
-                            if "serie a" in s_str:
-                                found = re.search(r'(\d+)', s_str)
-                                if found: g_seriea = found.group(1)
-                        
+                            if "serie a" in s_str: found = re.search(r'(\d+)', s_str); g_seriea = found.group(1) if found else "?"
                         curr = r + 1
                         while curr < rows:
                             home = df.iat[curr, c]
@@ -183,12 +211,7 @@ def parse_calendario_complesso(filepath):
                             pt_a = df.iat[curr, c+2]
                             away = df.iat[curr, c+3]
                             res = df.iat[curr, c+4]
-                            
-                            matches.append({
-                                'Giornata_Lega': g_lega, 'Giornata_SerieA': g_seriea,
-                                'Casa': home, 'Punti_Casa': pt_h,
-                                'Punti_Trasferta': pt_a, 'Trasferta': away, 'Risultato': res
-                            })
+                            matches.append({'Giornata_Lega': g_lega, 'Giornata_SerieA': g_seriea, 'Casa': home, 'Punti_Casa': pt_h, 'Punti_Trasferta': pt_a, 'Trasferta': away, 'Risultato': res})
                             curr += 1
                     except: continue
         return pd.DataFrame(matches).sort_values('Giornata_Lega') if matches else None
@@ -196,7 +219,7 @@ def parse_calendario_complesso(filepath):
 
 def get_table_config():
     return {
-        "Fanta_Media": st.column_config.ProgressColumn("FM", min_value=5, max_value=10, format="%.2f"),
+        "Fanta_Media": st.column_config.NumberColumn("FM", format="%.2f"),
         "Media_Voto": st.column_config.NumberColumn("MV", format="%.2f"),
         "Gol_Totali": st.column_config.NumberColumn("Gol", format="%d"),
         "Gol_Subiti": st.column_config.NumberColumn("Subiti", format="%d"),
@@ -208,7 +231,9 @@ def get_table_config():
         "Rigori_Sbagliati": st.column_config.NumberColumn("Rig.Sba", format="%d"),
         "Partite_Giocate": st.column_config.NumberColumn("Pres", format="%d"),
         "Pos": st.column_config.NumberColumn("Rank", format="#%d"),
-        "Status_Probabile": st.column_config.TextColumn("News", width="small")
+        "Status_Probabile": st.column_config.TextColumn("News", width="small"),
+        "Logo_SerieA": st.column_config.ImageColumn("Club", width="small"),
+        "Costo": st.column_config.NumberColumn("Costo", format="%d")
     }
 
 # --- 2. IMPORTA ROSE ---
@@ -217,7 +242,6 @@ def importa_rose(filepath):
         df = leggi_excel_intelligente(filepath)
         if df is None: return None
         if 'Ruolo' not in df.columns: df = pd.read_excel(filepath, header=None)
-
         players = []
         for col in range(len(df.columns)):
             rows = df.index[df[col].astype(str) == 'Ruolo'].tolist()
@@ -232,15 +256,8 @@ def importa_rose(filepath):
                     costo = df.iloc[curr, col+3]
                     if pd.isna(ruolo) or str(ruolo).startswith("Crediti"): break
                     if pd.notna(nome):
-                        p = {
-                            'Giocatore': nome, 'Ruolo': ruolo, 
-                            'Squadra_SerieA': serie_a, 'Fanta_Squadra': team, 
-                            'Costo': costo, 'Media_Voto': 0.0, 'Fanta_Media': 0.0, 
-                            'Partite_Giocate': 0, 'Gol_Totali': 0, 'Gol_Subiti': 0, 
-                            'Assist': 0, 'Ammonizioni': 0, 'Espulsioni': 0,
-                            'Rigori_Segnati': 0, 'Rigori_Sbagliati': 0, 
-                            'Rigori_Parati': 0, 'Autoreti': 0, 'Status_Probabile': '?'
-                        }
+                        path_logo = trova_logo_seriea(serie_a)
+                        p = {'Giocatore': nome, 'Ruolo': ruolo, 'Squadra_SerieA': serie_a, 'Path_Logo': path_logo, 'Fanta_Squadra': team, 'Costo': costo, 'Media_Voto': 0.0, 'Fanta_Media': 0.0, 'Partite_Giocate': 0, 'Gol_Totali': 0, 'Gol_Subiti': 0, 'Assist': 0, 'Ammonizioni': 0, 'Espulsioni': 0, 'Rigori_Segnati': 0, 'Rigori_Sbagliati': 0, 'Rigori_Parati': 0, 'Autoreti': 0, 'Status_Probabile': '?'}
                         players.append(p)
                     curr += 1
         return pd.DataFrame(players)
@@ -253,12 +270,10 @@ def elabora_storico_voti(df_rose, directory):
     pattern = os.path.join(directory, "*Giornata*.xlsx")
     files = glob.glob(pattern)
     files.sort(key=estrai_numero_giornata)
-    
     st.info(f"Elaborazione in corso... File trovati: {len(files)}")
     bar = st.progress(0)
     all_data = []
     history_records = []
-
     for i, file in enumerate(files):
         giornata_num = estrai_numero_giornata(file)
         try:
@@ -266,11 +281,9 @@ def elabora_storico_voti(df_rose, directory):
             if df_day is None: continue
             df_day.columns = df_day.columns.astype(str).str.lower().str.strip()
             cols = df_day.columns
-            
             c_nome = next((c for c in cols if c in ['nome', 'calciatore', 'nome calciatore']), None)
             c_voto = next((c for c in cols if c in ['voto', 'v']), None)
             if not c_nome or not c_voto: continue
-
             c_gf = next((c for c in cols if c == 'gf'), None)
             c_gs = next((c for c in cols if c == 'gs'), None)
             c_rp = next((c for c in cols if c == 'rp'), None)
@@ -280,16 +293,13 @@ def elabora_storico_voti(df_rose, directory):
             c_amm = next((c for c in cols if c == 'amm'), None)
             c_esp = next((c for c in cols if c == 'esp'), None)
             c_ass = next((c for c in cols if c == 'ass'), None)
-
             df_day = df_day.dropna(subset=[c_nome])
             df_day[c_voto] = pd.to_numeric(df_day[c_voto], errors='coerce')
             validi = df_day[df_day[c_voto] > 0].copy()
             validi['clean_name'] = validi[c_nome].apply(normalizza_nome)
-            
             def get_val(df_in, col_name):
                 if col_name: return pd.to_numeric(df_in[col_name], errors='coerce').fillna(0)
                 return 0
-
             validi['gf'] = get_val(validi, c_gf)
             validi['gs'] = get_val(validi, c_gs)
             validi['rp'] = get_val(validi, c_rp)
@@ -299,32 +309,22 @@ def elabora_storico_voti(df_rose, directory):
             validi['amm'] = get_val(validi, c_amm)
             validi['esp'] = get_val(validi, c_esp)
             validi['ass'] = get_val(validi, c_ass)
-
-            validi['fantavoto'] = (validi[c_voto] 
-                                + (validi['gf']*3) + (validi['rf']*3) + (validi['rp']*3) + (validi['ass']*1)
-                                - (validi['gs']*1) - (validi['au']*2) - (validi['rs']*3) 
-                                - (validi['amm']*0.5) - (validi['esp']*1))
-            
+            validi['fantavoto'] = (validi[c_voto] + (validi['gf']*3) + (validi['rf']*3) + (validi['rp']*3) + (validi['ass']*1) - (validi['gs']*1) - (validi['au']*2) - (validi['rs']*3) - (validi['amm']*0.5) - (validi['esp']*1))
             mini = validi[['clean_name', c_voto, 'fantavoto', 'gf', 'gs', 'rp', 'rs', 'rf', 'au', 'amm', 'esp', 'ass']].rename(columns={c_voto: 'voto'})
             all_data.append(mini)
-            
-            hist_mini = validi[['clean_name', c_voto, 'fantavoto']].copy()
+            hist_mini = validi[['clean_name', c_voto, 'fantavoto', 'gf', 'ass', 'amm', 'esp', 'rp', 'rf', 'rs']].copy()
             hist_mini['Giornata'] = giornata_num
-            hist_mini.rename(columns={c_voto: 'Voto', 'fantavoto': 'Fantavoto'}, inplace=True)
+            hist_mini.rename(columns={c_voto: 'Voto', 'fantavoto': 'Fantavoto', 'gf':'Gol', 'ass':'Assist', 'amm':'Amm', 'esp':'Esp', 'rp':'Rig.Par', 'rf':'Rig.Fatti', 'rs':'Rig.Sba'}, inplace=True)
             history_records.append(hist_mini)
-
         except Exception: pass
         bar.progress((i + 1) / len(files))
-
     if history_records: pd.concat(history_records).to_csv(FILE_HISTORY, index=False)
-
     if all_data:
         big_df = pd.concat(all_data)
         stats = big_df.groupby('clean_name').sum(numeric_only=True)
         stats['presenze'] = big_df.groupby('clean_name')['voto'].count()
         stats['media_voto'] = big_df.groupby('clean_name')['voto'].mean()
         stats['fanta_media'] = big_df.groupby('clean_name')['fantavoto'].mean()
-        
         df_rose = check_database_integrity(df_rose)
         count = 0
         for idx, row in df_rose.iterrows():
@@ -356,7 +356,6 @@ else:
 
 st.title("⚽ Fanta-Manager 2026")
 
-# SIDEBAR
 st.sidebar.header("Pannello Controllo")
 if st.sidebar.button("🔄 Ricarica Rose (Reset)"):
     if os.path.exists(FILE_ROSE_IMPORT):
@@ -380,118 +379,82 @@ if st.sidebar.button("📡 Scarica da Gazzetta.it"):
             df.to_csv(FILE_DATABASE, index=False)
             st.success("Fatto! Controlla la colonna 'News'.")
             st.rerun()
-        else:
-            st.warning("Impossibile scaricare le formazioni. Riprova più tardi.")
+        else: st.warning("Impossibile scaricare le formazioni. Riprova più tardi.")
 
 if not df.empty and df['Partite_Giocate'].sum() > 0:
 
-    # --- 1. ULTIMA GIORNATA (LAYOUT 2x2 GRIGLIA) ---
+    # --- 1. ULTIMA GIORNATA ---
     if os.path.exists(FILE_CALENDARIO):
         df_cal = parse_calendario_complesso(FILE_CALENDARIO)
         if df_cal is not None:
             giocate = df_cal[df_cal['Risultato'].astype(str).str.contains(r'\d', na=False)]
-            
             if not giocate.empty:
                 last_g = giocate['Giornata_Lega'].max()
                 matches_last = giocate[giocate['Giornata_Lega'] == last_g]
-                
                 st.markdown(f"##### 🏟️ Ultimo Turno: Giornata {last_g}")
-                
-                # GRIGLIA 2 per riga (2x2)
                 rows_iter = [matches_last.iloc[i:i+2] for i in range(0, len(matches_last), 2)]
-                
                 for row_matches in rows_iter:
                     cols = st.columns(2)
                     for idx, (index, match) in enumerate(row_matches.iterrows()):
                         with cols[idx]:
                             with st.container(border=True):
-                                # Layout: LogoCasa | Risultato | LogoTrasferta
                                 cL, cC, cR = st.columns([1, 2, 1])
-                                hl = trova_logo(match['Casa'])
-                                al = trova_logo(match['Trasferta'])
-                                
+                                hl = trova_logo_fanta(match['Casa'])
+                                al = trova_logo_fanta(match['Trasferta'])
                                 with cL:
-                                    if hl: st.image(hl, width=40)
+                                    if hl: st.image(hl, width=30)
+                                    st.markdown(f"<div style='font-size:12px; font-weight:bold; color:#333'>{match['Casa']}</div>", unsafe_allow_html=True)
                                 with cR:
-                                    if al: st.image(al, width=40)
+                                    if al: st.image(al, width=30)
+                                    st.markdown(f"<div style='font-size:12px; font-weight:bold; color:#333'>{match['Trasferta']}</div>", unsafe_allow_html=True)
                                 with cC:
-                                    st.markdown(f"<div style='text-align:center; font-weight:bold; font-size:24px; color:#1f77b4'>{match['Risultato']}</div>", unsafe_allow_html=True)
-                                
-                                # Nomi e Punti Sotto
-                                st.markdown(f"""
-                                <div style='text-align:center; font-size:14px; margin-top:5px'>
-                                    <b>{match['Casa']}</b> vs <b>{match['Trasferta']}</b><br>
-                                    <span style='color:#ffbd45; font-size:16px; font-weight:bold;'>({match['Punti_Casa']} - {match['Punti_Trasferta']})</span>
-                                </div>
-                                """, unsafe_allow_html=True)
+                                    st.markdown(f"<div style='text-align:center; font-weight:bold; font-size:20px; color:#1f77b4'>{match['Risultato']}</div>", unsafe_allow_html=True)
+                                    st.markdown(f"<div style='text-align:center; font-size:14px; font-weight:bold; color:#ff8c00'>({match['Punti_Casa']} - {match['Punti_Trasferta']})</div>", unsafe_allow_html=True)
                 st.markdown("---")
 
-    # --- KPI CUSTOM CARD ---
+    # --- KPI ---
     def card(label, name, val, sub, icon):
-        return f"""
-        <div style="background-color:white; padding:10px; border-radius:8px; border:1px solid #ddd; text-align:center; height: 120px; color:black;">
-            <div style="font-size:12px; color:#555; margin-bottom:5px;">{icon} {label}</div>
-            <div style="font-weight:bold; font-size:16px; margin-bottom:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:black;">{name}</div>
-            <div style="font-size:20px; font-weight:bold; color:#1f77b4; margin-bottom:5px;">{val}</div>
-            <div style="font-size:11px; color:#333;">{sub}</div>
-        </div>
-        """
-
+        return f"""<div style="background-color:white; padding:10px; border-radius:8px; border:1px solid #ddd; text-align:center; height: 120px; color:black;"><div style="font-size:12px; color:#555; margin-bottom:5px;">{icon} {label}</div><div style="font-weight:bold; font-size:16px; margin-bottom:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:black;">{name}</div><div style="font-size:20px; font-weight:bold; color:#1f77b4; margin-bottom:5px;">{val}</div><div style="font-size:11px; color:#333;">{sub}</div></div>"""
     c1, c2, c3, c4, c5 = st.columns(5)
-    
     top = df.loc[df['Gol_Totali'].idxmax()]
     c1.markdown(card("Capocannoniere", top['Giocatore'], f"{int(top['Gol_Totali'])} Gol", top['Fanta_Squadra'], "👑"), unsafe_allow_html=True)
-    
     ass = df.loc[df['Assist'].idxmax()]
     c2.markdown(card("Assist Man", ass['Giocatore'], f"{int(ass['Assist'])} Assist", ass['Fanta_Squadra'], "👟"), unsafe_allow_html=True)
-    
     portieri = df[(df['Ruolo']=='P') & (df['Partite_Giocate'] > 4)].sort_values('Gol_Subiti')
     best_p = portieri.iloc[0] if not portieri.empty else df.iloc[0]
     c3.markdown(card("Saracinesca", best_p['Giocatore'], f"{int(best_p['Gol_Subiti'])} Subiti", best_p['Fanta_Squadra'], "🧤"), unsafe_allow_html=True)
-    
     df['Malus_Tot'] = df['Ammonizioni'] + (df['Espulsioni'] * 3)
     cattivo = df.loc[df['Malus_Tot'].idxmax()]
     c4.markdown(card("Il Cattivo", cattivo['Giocatore'], f"{int(cattivo['Malus_Tot'])} Malus", cattivo['Fanta_Squadra'], "🟨"), unsafe_allow_html=True)
-
     rigorista = df.loc[df['Rigori_Segnati'].idxmax()]
     c5.markdown(card("Cecchino", rigorista['Giocatore'], f"{int(rigorista['Rigori_Segnati'])} Rig. Segnati", rigorista['Fanta_Squadra'], "🎯"), unsafe_allow_html=True)
 
     # TABS
     tab_class, tab_squadra, tab_giocatori, tab_match = st.tabs(["🏆 Classifica", "🏢 Scheda Squadra", "🏃 Giocatori", "🆚 Confronto"])
 
-    # --- TAB 1: CLASSIFICA PRO ---
     with tab_class:
         if os.path.exists(FILE_CLASSIFICA):
             df_cl = leggi_excel_intelligente(FILE_CLASSIFICA)
             if df_cl is not None:
                 df_cl = df_cl.loc[:, ~df_cl.columns.str.contains('^Unnamed')]
                 df_cl = df_cl.dropna(how='all', axis=1)
-
                 stats_squadre = df.groupby('Fanta_Squadra')[['Media_Voto', 'Fanta_Media']].mean().reset_index()
                 col_squadra = next((c for c in df_cl.columns if 'squadra' in c.lower()), None)
-                
                 if col_squadra:
                     df_cl = pd.merge(df_cl, stats_squadre, left_on=col_squadra, right_on='Fanta_Squadra', how='left')
-                    
                     headers = st.columns([0.5, 0.5, 3, 1, 1, 1, 1, 1, 1, 1, 1])
                     labels = ["#", "", "Squadra (Click)", "G", "V", "N", "P", "Pt.", "Tot", "MV", "FM"]
-                    for c, l in zip(headers, labels):
-                        c.markdown(f"**{l}**")
+                    for c, l in zip(headers, labels): c.markdown(f"**{l}**")
                     st.divider()
-                    
                     for idx, row in df_cl.iterrows():
                         cols = st.columns([0.5, 0.5, 3, 1, 1, 1, 1, 1, 1, 1, 1])
-                        logo_path = trova_logo(row[col_squadra])
-                        
+                        logo_path = trova_logo_fanta(row[col_squadra])
                         cols[0].write(f"**{idx + 1}**")
                         with cols[1]:
                             if logo_path: st.image(logo_path, width=25)
-                        
-                        # Link Button
                         if cols[2].button(f"**{row[col_squadra]}**", key=f"lnk_{idx}"):
                             st.session_state['selected_team'] = row[col_squadra]
                             st.toast(f"Vai a 'Scheda Squadra' per {row[col_squadra]}")
-                        
                         cols[3].write(str(int(row.get('G', 0))))
                         cols[4].write(str(int(row.get('V', 0))))
                         cols[5].write(str(int(row.get('N', 0))))
@@ -503,16 +466,13 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
                         st.markdown("<hr style='margin: 0px 0; border-top: 1px solid #eee'>", unsafe_allow_html=True)
             else: st.info("Manca File Classifica")
 
-    # --- TAB 2: SCHEDA SQUADRA ---
     with tab_squadra:
         teams = sorted(df['Fanta_Squadra'].unique())
         default_idx = 0
         if 'selected_team' in st.session_state and st.session_state['selected_team'] in teams:
             default_idx = teams.index(st.session_state['selected_team'])
-            
         sel_team_profile = st.selectbox("Seleziona Squadra:", teams, index=default_idx)
-        
-        logo_t = trova_logo(sel_team_profile)
+        logo_t = trova_logo_fanta(sel_team_profile)
         c1, c2 = st.columns([1, 6])
         with c1: 
             if logo_t: st.image(logo_t, width=100)
@@ -522,17 +482,13 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
         if os.path.exists(FILE_CALENDARIO):
             df_cal = parse_calendario_complesso(FILE_CALENDARIO)
             if df_cal is not None:
-                future = df_cal[
-                    ((df_cal['Casa'] == sel_team_profile) | (df_cal['Trasferta'] == sel_team_profile)) & 
-                    (df_cal['Risultato'].isna() | (df_cal['Risultato'] == "") | (df_cal['Risultato'] == "-"))
-                ]
+                future = df_cal[((df_cal['Casa'] == sel_team_profile) | (df_cal['Trasferta'] == sel_team_profile)) & (df_cal['Risultato'].isna() | (df_cal['Risultato'] == "") | (df_cal['Risultato'] == "-"))]
                 if not future.empty:
                     nm = future.iloc[0]
                     adv = nm['Trasferta'] if nm['Casa'] == sel_team_profile else nm['Casa']
                     st.info(f"📅 Prossimo Turno (G{nm['Giornata_Lega']}): contro **{adv}**")
         
         d_team = df[df['Fanta_Squadra'] == sel_team_profile]
-        
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Media Voto Rosa", f"{d_team['Media_Voto'].mean():.2f}")
         m2.metric("FantaMedia Rosa", f"{d_team['Fanta_Media'].mean():.2f}")
@@ -543,34 +499,33 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
         d_team = d_team.sort_values('Ruolo', key=lambda x: x.map({'P':0, 'D':1, 'C':2, 'A':3}))
         d_team['Pos'] = range(1, len(d_team)+1)
         
-        # ALTEZZA DINAMICA (SHOW ALL)
+        # NUOVO ORDINE COLONNE
+        cols_ok = ['Pos', 'Ruolo', 'Giocatore', 'Logo_SerieA', 'Costo', 'Status_Probabile', 'Media_Voto', 'Fanta_Media', 'Partite_Giocate', 'Gol_Totali', 'Assist', 'Ammonizioni', 'Espulsioni']
+        
         h_table = (len(d_team) + 1) * 35 + 3
         st.dataframe(
-            d_team[['Pos', 'Ruolo', 'Giocatore', 'Status_Probabile', 'Media_Voto', 'Fanta_Media', 'Gol_Totali', 'Partite_Giocate']].style.map(applica_stile_ruoli, subset=['Ruolo']),
+            d_team[cols_ok].style.map(applica_stile_ruoli, subset=['Ruolo']).map(highlight_voti, subset=['Media_Voto', 'Fanta_Media']),
             use_container_width=True, 
             hide_index=True,
             height=h_table,
             column_config=get_table_config()
         )
 
-    # --- TAB 3: GIOCATORI ---
     with tab_giocatori:
         st.subheader("Top Performers")
         c_r, c_o = st.columns(2)
         ruolo = c_r.radio("Filtro Ruolo", ["Tutti", "P", "D", "C", "A"], horizontal=True)
         order = c_o.selectbox("Ordina", ["Fanta_Media", "Gol_Totali", "Assist", "Media_Voto"])
-        
         view = df.copy()
         if ruolo != "Tutti": view = view[view['Ruolo'] == ruolo]
         view = view.sort_values(order, ascending=False)
         view['Pos'] = range(1, len(view) + 1)
         
+        # STESSO ORDINE E COLORI PER LISTA GENERALE
         st.dataframe(
-            view.head(50)[['Pos', 'Ruolo', 'Giocatore', 'Status_Probabile', 'Fanta_Squadra', 'Fanta_Media', 'Media_Voto', 'Gol_Totali', 'Assist', 'Partite_Giocate']].style.map(applica_stile_ruoli, subset=['Ruolo']),
-            use_container_width=True, hide_index=True,
-            column_config=get_table_config()
+            view.head(50)[cols_ok].style.map(applica_stile_ruoli, subset=['Ruolo']).map(highlight_voti, subset=['Media_Voto', 'Fanta_Media']),
+            use_container_width=True, hide_index=True, column_config=get_table_config()
         )
-        
         st.divider()
         st.markdown("##### 📇 Dettaglio Giocatore")
         sel_pl = st.selectbox("Cerca Nome:", sorted(df['Giocatore'].unique()), index=None)
@@ -578,12 +533,13 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
             p = df[df['Giocatore'] == sel_pl].iloc[0]
             col_c = get_role_color(p['Ruolo'])
             img = trova_immagine(p['Giocatore'])
-            
             c1, c2 = st.columns([1, 4])
             with c1:
                 if img: st.image(img, width=120)
                 else: st.markdown(f"<div style='background:{col_c};width:100px;height:100px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:30px;font-weight:bold'>{p['Ruolo']}</div>", unsafe_allow_html=True)
             with c2:
+                logo_club_path = p.get('Path_Logo')
+                if logo_club_path and os.path.exists(logo_club_path): st.image(logo_club_path, width=40)
                 st.markdown(f"<h3 style='color:{col_c}; margin:0'>{p['Giocatore']} {p['Status_Probabile']}</h3>", unsafe_allow_html=True)
                 st.markdown(f"**{p['Fanta_Squadra']}**")
                 k1, k2, k3, k4 = st.columns(4)
@@ -591,23 +547,25 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
                 k2.metric("FM", f"{p['Fanta_Media']:.2f}")
                 k3.metric("Gol", f"{int(p['Gol_Totali'])}")
                 k4.metric("Assist", f"{int(p['Assist'])}")
-            
             if os.path.exists(FILE_HISTORY):
                 df_h = pd.read_csv(FILE_HISTORY)
-                ph = df_h[df_h['clean_name'] == normalizza_nome(p['Giocatore'])].sort_values('Giornata').tail(5)
+                ph = df_h[df_h['clean_name'] == normalizza_nome(p['Giocatore'])].sort_values('Giornata')
                 if not ph.empty:
+                    st.subheader("Storico Giornate")
+                    st.dataframe(
+                        ph[['Giornata', 'Voto', 'Fantavoto', 'Gol', 'Assist', 'Amm', 'Esp', 'Rig.Fatti', 'Rig.Sba']].style.format({"Voto": "{:.1f}", "Fantavoto": "{:.1f}", "Gol": "{:.0f}"}),
+                        hide_index=True, use_container_width=True
+                    )
+                    st.caption("Andamento Fantavoto")
                     st.line_chart(ph.set_index('Giornata')['Fantavoto'])
 
-    # --- TAB 4: CONFRONTO ---
     with tab_match:
         c1, c2 = st.columns(2)
         ta = c1.selectbox("Squadra A", sorted(df['Fanta_Squadra'].unique()), index=0)
         tb = c2.selectbox("Squadra B", sorted(df['Fanta_Squadra'].unique()), index=1)
-        
         da = df[df['Fanta_Squadra'] == ta]
         db = df[df['Fanta_Squadra'] == tb]
-        la, lb = trova_logo(ta), trova_logo(tb)
-
+        la, lb = trova_logo_fanta(ta), trova_logo_fanta(tb)
         def row_confronto(label, val_a, val_b, lower_better=False):
             color_a, color_b = "#333", "#333"
             if val_a != val_b:
@@ -617,15 +575,7 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
                 else:
                     if val_a > val_b: color_a, color_b = "green", "red"
                     else: color_a, color_b = "red", "green"
-            
-            return f"""
-            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding:8px 0; color: black;">
-                <div style="width:30%; text-align:center; font-weight:bold; font-size:18px; color:{color_a}">{val_a}</div>
-                <div style="width:40%; text-align:center; font-size:14px; color:#666;">{label}</div>
-                <div style="width:30%; text-align:center; font-weight:bold; font-size:18px; color:{color_b}">{val_b}</div>
-            </div>
-            """
-
+            return f"""<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding:8px 0; color: black;"><div style="width:30%; text-align:center; font-weight:bold; font-size:18px; color:{color_a}">{val_a}</div><div style="width:40%; text-align:center; font-size:14px; color:#666;">{label}</div><div style="width:30%; text-align:center; font-weight:bold; font-size:18px; color:{color_b}">{val_b}</div></div>"""
         col_L, col_C, col_R = st.columns([1, 2, 1])
         with col_L:
             if la: st.image(la, width=80)
@@ -633,7 +583,6 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
         with col_R:
             if lb: st.image(lb, width=80)
             st.markdown(f"<h3 style='text-align:center'>{tb}</h3>", unsafe_allow_html=True)
-        
         with col_C:
             st.markdown("#### Confronto Statistico")
             mv_a, mv_b = round(da['Media_Voto'].mean(), 2), round(db['Media_Voto'].mean(), 2)
@@ -643,7 +592,6 @@ if not df.empty and df['Partite_Giocate'].sum() > 0:
             mal_a = int(da['Ammonizioni'].sum() + da['Espulsioni'].sum()*3)
             mal_b = int(db['Ammonizioni'].sum() + db['Espulsioni'].sum()*3)
             val_a, val_b = int(da['Costo'].sum()), int(db['Costo'].sum())
-
             st.markdown(row_confronto("Media Voto Rosa", mv_a, mv_b), unsafe_allow_html=True)
             st.markdown(row_confronto("FantaMedia Rosa", fm_a, fm_b), unsafe_allow_html=True)
             st.markdown(row_confronto("Gol Totali", gol_a, gol_b), unsafe_allow_html=True)
