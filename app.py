@@ -109,6 +109,16 @@ def check_database_integrity(df):
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
     return df
 
+
+def salva_file_caricato(uploaded_file, destinazione):
+    try:
+        with open(destinazione, 'wb') as f:
+            f.write(uploaded_file.getbuffer())
+        return True
+    except Exception as e:
+        st.error(f"Impossibile salvare {uploaded_file.name}: {e}")
+        return False
+
 def get_role_color(ruolo):
     colors = {'P': '#f39c12', 'D': '#27ae60', 'C': '#2980b9', 'A': '#c0392b'}
     return colors.get(ruolo, 'black')
@@ -335,6 +345,26 @@ st.title("⚽ Fanta-Manager 2026")
 
 # SIDEBAR
 st.sidebar.header("Pannello Controllo")
+with st.sidebar.expander("Caricamenti veloci"):
+    up_rose = st.file_uploader("📥 Importa Rose (xlsx/csv)", type=["xlsx", "csv"], key="rose_upl")
+    if up_rose and st.button("Salva Rose Caricate", key="save_rose"):
+        if salva_file_caricato(up_rose, FILE_ROSE_IMPORT):
+            st.success("Rose aggiornate!")
+            st.session_state.pop('selected_team', None)
+            st.rerun()
+
+    up_class = st.file_uploader("🏆 Importa Classifica (xlsx/csv)", type=["xlsx", "csv"], key="class_upl")
+    if up_class and st.button("Salva Classifica", key="save_class"):
+        if salva_file_caricato(up_class, FILE_CLASSIFICA):
+            st.success("Classifica aggiornata!")
+            st.rerun()
+
+    up_cal = st.file_uploader("📅 Importa Calendario (xlsx/csv)", type=["xlsx", "csv"], key="cal_upl")
+    if up_cal and st.button("Salva Calendario", key="save_cal"):
+        if salva_file_caricato(up_cal, FILE_CALENDARIO):
+            st.success("Calendario aggiornato!")
+            st.rerun()
+
 if st.sidebar.button("🔄 Ricarica Rose (Reset)"):
     if os.path.exists(FILE_ROSE_IMPORT):
         nuovo = importa_rose(FILE_ROSE_IMPORT)
@@ -343,10 +373,16 @@ if st.sidebar.button("🔄 Ricarica Rose (Reset)"):
             st.rerun()
 
 if st.sidebar.button("📊 Aggiorna Storico Voti"):
-    if os.path.exists(DIR_VOTI):
-        df = elabora_storico_voti(df, DIR_VOTI)
-        df.to_csv(FILE_DATABASE, index=False)
-        st.rerun()
+    if not os.path.exists(DIR_VOTI):
+        st.sidebar.warning("Cartella 'Voti' mancante.")
+    else:
+        voti_files = glob.glob(os.path.join(DIR_VOTI, "*Giornata*.xlsx"))
+        if not voti_files:
+            st.sidebar.warning("Nessun file voti trovato nella cartella 'Voti'.")
+        else:
+            df = elabora_storico_voti(df, DIR_VOTI)
+            df.to_csv(FILE_DATABASE, index=False)
+            st.rerun()
 
 st.sidebar.markdown("### 🌐 Probabili Formazioni")
 if st.sidebar.button("📡 Scarica da Gazzetta.it"):
